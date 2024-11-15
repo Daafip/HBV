@@ -4,9 +4,20 @@ import json
 import dask
 
 
+INPUT_FILES = ["precipitation_file", "potential_evaporation_file", "mean_temperature_file"]
+
+
 def read_config(config_file: str) -> dict:
     with open(config_file) as cfg:
         config = json.load(cfg)
+
+    for file in INPUT_FILES:
+        config[file] = Path(config[file])
+
+        #Make forcing paths absolute based on location of config file:
+        if not config[file].is_absolute():
+            config[file] = (Path(config_file).parent / config[file]).absolute()
+
     return config
 
 
@@ -37,7 +48,28 @@ def load_var(ncfile: str | Path, varname: str) -> xr.DataArray:
         data = load_precip(forcing.directory / forcing.pr)
     """
     with dask.config.set(scheduler="synchronous"):
-        data = xr.load_dataset(ncfile)
-    assert "time" in data.dims
-    assert varname in data.data_vars
-    return data[varname]
+        data: xr.Dataset = xr.load_dataset(ncfile)
+
+    if "time" not in data.dims:
+        msg = "No time dim in data!"
+        raise ValueError(msg)
+    if varname not in data.data_vars:
+        msg = f"Variable '{varname} is missing from the forcing data!"
+        raise ValueError(msg)
+
+    da = data[varname]
+
+    if "unit" in da.attrs:  ## CF-convention is 'units' not 'unit'
+        da.attrs["units"] = da.attrs.pop("unit")
+
+    if "units" in da.attrs:  # Must have units attr to be able to check
+        if da.attrs["units"] in ["kg m-2 s-1", "kg s-1 m-2"]:
+            with xr.set_options(keep_attrs=True):
+                da = da * 86400
+            da.attrs.update({"units": "mm/d"})
+        elif da.attrs["units"] == "K":
+            with xr.set_options(keep_attrs=True):
+                da -= 273.15
+            da.attrs.update({"units": "degC"})
+
+    return da
